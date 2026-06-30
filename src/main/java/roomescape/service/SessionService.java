@@ -7,9 +7,11 @@ import java.util.List;
 import java.util.Objects;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import roomescape.controller.dto.PaymentReservationRequest;
 import roomescape.controller.dto.ReservationPatchRequest;
 import roomescape.controller.dto.ReservationRequest;
 import roomescape.controller.dto.WaitingRequest;
+import roomescape.domain.PaymentOrder;
 import roomescape.domain.Reservation;
 import roomescape.domain.Session;
 import roomescape.domain.Theme;
@@ -18,9 +20,16 @@ import roomescape.domain.Waiting;
 import roomescape.exception.DuplicateReservationException;
 import roomescape.exception.DuplicateSessionException;
 import roomescape.exception.SessionNotFoundException;
+import roomescape.payment.PaymentAmountMismatchException;
+import roomescape.payment.PaymentConnectionException;
+import roomescape.payment.PaymentResultUnknownException;
+import roomescape.payment.domain.PaymentConfirmation;
+import roomescape.payment.gateway.PaymentGateway;
+import roomescape.payment.gateway.toss.TossPaymentException;
 import roomescape.repository.SessionRepository;
 import roomescape.service.dto.AvailableTimeSlot;
 import roomescape.service.dto.Booking;
+import roomescape.service.dto.PaymentHistory;
 
 @Service
 @Transactional(readOnly = true)
@@ -31,15 +40,20 @@ public class SessionService {
     private final ThemeService themeService;
     private final ReservationService reservationService;
     private final WaitingService waitingService;
+    private final PaymentGateway paymentGateway;
+    private final PaymentOrderService paymentOrderService;
 
     public SessionService(SessionRepository sessionRepository, TimeSlotService timeSlotService,
                           ThemeService themeService, ReservationService reservationService,
-                          WaitingService waitingService) {
+                          WaitingService waitingService, PaymentGateway paymentGateway,
+                          PaymentOrderService paymentOrderService) {
         this.sessionRepository = sessionRepository;
         this.timeSlotService = timeSlotService;
         this.themeService = themeService;
         this.reservationService = reservationService;
         this.waitingService = waitingService;
+        this.paymentGateway = paymentGateway;
+        this.paymentOrderService = paymentOrderService;
     }
 
     public List<Session> allSessions() {
@@ -93,9 +107,54 @@ public class SessionService {
     }
 
     @Transactional
-    public Reservation makeReservation(ReservationRequest request) {
+    public String preparePayment(Long amount) {
+        return paymentOrderService.prepare(amount).orderId();
+    }
+
+    @Transactional
+    public void cancelPreparedPayment(String orderId) {
+        paymentOrderService.cancel(orderId);
+    }
+
+    public List<PaymentHistory> findPaymentHistory(String userName) {
+        return paymentOrderService.findByName(userName).stream()
+                .map(order -> PaymentHistory.of(order, findSessionOrNull(order.sessionId())))
+                .toList();
+    }
+
+    @Transactional
+    public Reservation makeReservation(PaymentReservationRequest request) {
         Session session = findSessionOrThrow(request.date(), request.timeId(), request.themeId());
-        return reservationService.save(request.name(), session);
+        PaymentOrder order = paymentOrderService.getByOrderId(request.orderId());
+
+        if (order.isConfirmed()) {
+            return reservationService.findBySession(session)
+                    .orElseThrow(() -> new IllegalStateException("확정된 주문의 예약을 찾을 수 없습니다: " + request.orderId()));
+        }
+        if (!order.amount().equals(request.amount())) {
+            throw new PaymentAmountMismatchException(order.amount(), request.amount());
+        }
+
+        confirmWithGateway(order, session, request);
+        paymentOrderService.confirm(order, request.name(), session.getId(), request.paymentKey());
+        return reservationService.save(request.name(), session, request.amount(), request.paymentKey());
+    }
+
+    private void confirmWithGateway(PaymentOrder order, Session session, PaymentReservationRequest request) {
+        PaymentConfirmation confirmation = new PaymentConfirmation(
+                request.paymentKey(), order.orderId(), request.amount(), order.idempotencyKey());
+        try {
+            paymentGateway.confirm(confirmation);
+        } catch (PaymentResultUnknownException e) {
+            paymentOrderService.recordUnknown(order.orderId(), request.name(), session.getId(), request.paymentKey());
+            throw e;
+        } catch (PaymentConnectionException e) {
+            paymentOrderService.recordRetryable(order.orderId(), request.name(), session.getId());
+            throw e;
+        } catch (TossPaymentException e) {
+            paymentOrderService.recordFailed(order.orderId(), request.name(), session.getId());
+            throw e;
+        }
     }
 
     @Transactional
@@ -159,6 +218,13 @@ public class SessionService {
     private Session findSessionOrThrow(LocalDate date, Long timeId, Long themeId) {
         return sessionRepository.findByDateAndTimeSlotIdAndThemeId(date, timeId, themeId)
                 .orElseThrow(SessionNotFoundException::new);
+    }
+
+    private Session findSessionOrNull(Long sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
+        return sessionRepository.findById(sessionId).orElse(null);
     }
 
     private void promoteWaitingIfExists(Session session) {

@@ -8,9 +8,16 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import roomescape.payment.OutboundRateLimitException;
+import roomescape.payment.PaymentAmountMismatchException;
+import roomescape.payment.PaymentConnectionException;
+import roomescape.payment.PaymentResultUnknownException;
+import roomescape.payment.TossRateLimitException;
+import roomescape.payment.gateway.toss.TossPaymentException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -47,6 +54,56 @@ public class ProblemDetailsAdvice {
         ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(status, exception.getMessage());
         problemDetail.setProperty("code", exception.getErrorCode());
         return ResponseEntity.status(status).body(problemDetail);
+    }
+
+    @ExceptionHandler(PaymentAmountMismatchException.class)
+    public ResponseEntity<ProblemDetail> handlePaymentAmountMismatchException(PaymentAmountMismatchException exception) {
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, exception.getMessage());
+        problemDetail.setProperty("code", "PAYMENT_AMOUNT_MISMATCH");
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(problemDetail);
+    }
+
+    @ExceptionHandler(TossPaymentException.class)
+    public ResponseEntity<ProblemDetail> handleTossPaymentException(TossPaymentException exception) {
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(exception.getStatus(), exception.getMessage());
+        problemDetail.setProperty("code", exception.getCode());
+        return ResponseEntity.status(exception.getStatus()).body(problemDetail);
+    }
+
+    @ExceptionHandler(PaymentResultUnknownException.class)
+    public ResponseEntity<ProblemDetail> handlePaymentResultUnknownException(PaymentResultUnknownException exception) {
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(HttpStatus.GATEWAY_TIMEOUT,
+                exception.getMessage() + " 주문/결제 내역에서 상태를 확인하거나 다시 시도해 주세요.");
+        problemDetail.setProperty("code", "PAYMENT_RESULT_UNKNOWN");
+        return ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT).body(problemDetail);
+    }
+
+    @ExceptionHandler(PaymentConnectionException.class)
+    public ResponseEntity<ProblemDetail> handlePaymentConnectionException(PaymentConnectionException exception) {
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                exception.getMessage() + " 잠시 후 다시 시도해 주세요.");
+        problemDetail.setProperty("code", "PAYMENT_GATEWAY_UNREACHABLE");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(problemDetail);
+    }
+
+    @ExceptionHandler(OutboundRateLimitException.class)
+    public ResponseEntity<ProblemDetail> handleOutboundRateLimitException(OutboundRateLimitException exception) {
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                exception.getMessage());
+        problemDetail.setProperty("code", "PAYMENT_OUTBOUND_RATE_LIMITED");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(exception.getRetryAfterSeconds()))
+                .body(problemDetail);
+    }
+
+    @ExceptionHandler(TossRateLimitException.class)
+    public ResponseEntity<ProblemDetail> handleTossRateLimitException(TossRateLimitException exception) {
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                exception.getMessage());
+        problemDetail.setProperty("code", "TOSS_RATE_LIMITED");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(exception.getRetryAfterSeconds()))
+                .body(problemDetail);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

@@ -26,24 +26,34 @@ public class Reservation {
     @JoinColumn(name = "session_id")
     private Session session;
 
+    private Long amount;
+
+    private String paymentKey;
+
     protected Reservation() {
     }
 
-    public Reservation(Long id, String name, Session session) {
+    public Reservation(Long id, String name, Session session, Long amount, String paymentKey) {
         validate(name, session);
         this.id = id;
         this.name = name;
         this.session = session;
+        this.amount = amount;
+        this.paymentKey = paymentKey;
     }
 
     public static Reservation transientOf(String name, Session session) {
-        return new Reservation(null, name, session);
+        return new Reservation(null, name, session, 0L, null);
+    }
+
+    public static Reservation transientOf(String name, Session session, Long amount, String paymentKey) {
+        return new Reservation(null, name, session, amount, paymentKey);
     }
 
     public Reservation reschedule(Session session, LocalDateTime currentDateTime) {
         Session patchedSession = Objects.requireNonNullElse(session, this.session);
         validateNotPast(currentDateTime);
-        return new Reservation(this.id, this.name, patchedSession);
+        return new Reservation(this.id, this.name, patchedSession, this.amount, this.paymentKey);
     }
 
     public boolean isReservedBy(String name) {
@@ -81,5 +91,13 @@ public class Reservation {
 
     public Session getSession() {
         return session;
+    }
+
+    public Long getAmount() {
+        return amount;
+    }
+
+    public String getPaymentKey() {
+        return paymentKey;
     }
 }
