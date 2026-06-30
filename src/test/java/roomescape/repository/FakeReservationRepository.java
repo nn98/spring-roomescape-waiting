@@ -14,7 +14,7 @@ public class FakeReservationRepository extends AbstractFakeRepository<Reservatio
 
     @Override
     protected Reservation withId(Reservation entity, Long id) {
-        return new Reservation(id, entity.getName(), entity.getSession());
+        return new Reservation(id, entity.getName(), entity.getSession(), entity.getAmount(), entity.getPaymentKey());
     }
 
     @Override

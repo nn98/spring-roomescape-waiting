@@ -3,11 +3,17 @@ package roomescape.service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import roomescape.controller.dto.PaymentReservationRequest;
 import roomescape.controller.dto.ReservationPatchRequest;
 import roomescape.controller.dto.ReservationRequest;
 import roomescape.controller.dto.WaitingRequest;
 import roomescape.domain.*;
 import roomescape.exception.*;
+import roomescape.payment.PaymentAmountMismatchException;
+import roomescape.payment.PaymentResultUnknownException;
+import roomescape.payment.domain.PaymentResult;
+import roomescape.payment.domain.PaymentStatus;
+import roomescape.payment.gateway.PaymentGateway;
 import roomescape.repository.*;
 import roomescape.service.dto.Booking;
 
@@ -27,6 +33,12 @@ class SessionServiceTest {
     private FakeSessionRepository sessionRepository;
     private FakeTimeSlotRepository timeSlotRepository;
     private FakeThemeRepository themeRepository;
+    private FakePaymentOrderRepository paymentOrderRepository;
+    private PaymentOrderService paymentOrderService;
+    private ReservationService reservationService;
+    private WaitingService waitingService;
+    private TimeSlotService timeSlotService;
+    private ThemeService themeService;
 
     private TimeSlot savedTimeSlot;
     private Theme savedTheme;
@@ -39,17 +51,27 @@ class SessionServiceTest {
         sessionRepository = new FakeSessionRepository();
         timeSlotRepository = new FakeTimeSlotRepository();
         themeRepository = new FakeThemeRepository();
+        paymentOrderRepository = new FakePaymentOrderRepository();
 
-        ReservationService reservationService = new ReservationService(reservationRepository);
-        WaitingService waitingService = new WaitingService(waitingRepository);
-        TimeSlotService timeSlotService = new TimeSlotService(timeSlotRepository);
-        ThemeService themeService = new ThemeService(themeRepository);
-        sessionService = new SessionService(sessionRepository, timeSlotService, themeService,
-                reservationService, waitingService);
+        reservationService = new ReservationService(reservationRepository);
+        waitingService = new WaitingService(waitingRepository);
+        timeSlotService = new TimeSlotService(timeSlotRepository);
+        themeService = new ThemeService(themeRepository);
+        paymentOrderService = new PaymentOrderService(paymentOrderRepository);
+
+        PaymentGateway paymentGateway = confirmation -> new PaymentResult(
+                confirmation.paymentKey(), confirmation.orderId(), PaymentStatus.DONE, confirmation.amount());
+        paymentOrderRepository.save(PaymentOrder.prepare("order_test", 0L));
+        sessionService = sessionServiceWith(paymentGateway);
 
         savedTimeSlot = timeSlotRepository.save(TimeSlot.transientOf(LocalTime.of(10, 0)));
         savedTheme = themeRepository.save(Theme.transientOf("이름", "설명", "test.com"));
         savedSession = sessionRepository.save(Session.transientOf(futureDate, savedTimeSlot, savedTheme));
+    }
+
+    private SessionService sessionServiceWith(PaymentGateway paymentGateway) {
+        return new SessionService(sessionRepository, timeSlotService, themeService,
+                reservationService, waitingService, paymentGateway, paymentOrderService);
     }
 
     @Test
@@ -86,7 +108,7 @@ class SessionServiceTest {
     @DisplayName("존재하지 않는 세션에 예약을 시도하면 예외가 발생한다.")
     void makeReservation_SessionNotFound() {
         assertThatThrownBy(() -> sessionService.makeReservation(
-                new ReservationRequest("브라운", futureDate, 999L, savedTheme.getId())))
+                new PaymentReservationRequest("브라운", futureDate, 999L, savedTheme.getId(), 0L, "pk_test", "order_test")))
                 .isInstanceOf(SessionNotFoundException.class);
     }
 
@@ -103,9 +125,35 @@ class SessionServiceTest {
     void makeReservation_PastDate() {
         Session pastSession = sessionRepository.save(
                 Session.transientOf(LocalDate.now().minusDays(1), savedTimeSlot, savedTheme));
+        paymentOrderRepository.save(PaymentOrder.prepare("order_past", 0L));
         assertThatThrownBy(() -> sessionService.makeReservation(
-                new ReservationRequest("브라운", pastSession.getDate(), savedTimeSlot.getId(), savedTheme.getId())))
+                new PaymentReservationRequest("브라운", pastSession.getDate(), savedTimeSlot.getId(), savedTheme.getId(), 0L, "pk_test", "order_past")))
                 .isInstanceOf(PastTimeException.class);
+    }
+
+    @Test
+    @DisplayName("저장 금액과 다른 amount가 들어오면 승인 호출 전에 차단된다.")
+    void makeReservation_AmountMismatch() {
+        paymentOrderRepository.save(PaymentOrder.prepare("order_mismatch", 10000L));
+        assertThatThrownBy(() -> sessionService.makeReservation(
+                new PaymentReservationRequest("브라운", futureDate, savedTimeSlot.getId(), savedTheme.getId(), 9000L, "pk_test", "order_mismatch")))
+                .isInstanceOf(PaymentAmountMismatchException.class);
+    }
+
+    @Test
+    @DisplayName("read timeout이면 주문이 확인 필요(UNKNOWN)로 기록되고 예외가 전파된다.")
+    void makeReservation_ReadTimeoutRecordsUnknown() {
+        PaymentGateway timeoutGateway = confirmation -> {
+            throw new PaymentResultUnknownException("응답 없음", new RuntimeException());
+        };
+        SessionService service = sessionServiceWith(timeoutGateway);
+        paymentOrderRepository.save(PaymentOrder.prepare("order_unknown", 0L));
+
+        assertThatThrownBy(() -> service.makeReservation(
+                new PaymentReservationRequest("브라운", futureDate, savedTimeSlot.getId(), savedTheme.getId(), 0L, "pk_test", "order_unknown")))
+                .isInstanceOf(PaymentResultUnknownException.class);
+        assertThat(paymentOrderRepository.findByOrderId("order_unknown").orElseThrow().status())
+                .isEqualTo(PaymentOrderStatus.UNKNOWN);
     }
 
     @Test
@@ -222,8 +270,10 @@ class SessionServiceTest {
         assertThat(availableTimes).isNotNull();
     }
 
-    private ReservationRequest basicRequest(String name) {
-        return new ReservationRequest(name, futureDate, savedTimeSlot.getId(), savedTheme.getId());
+    private PaymentReservationRequest basicRequest(String name) {
+        String orderId = "order_" + name;
+        paymentOrderRepository.save(PaymentOrder.prepare(orderId, 0L));
+        return new PaymentReservationRequest(name, futureDate, savedTimeSlot.getId(), savedTheme.getId(), 0L, "pk_test", orderId);
     }
 
     private Reservation savePastReservation() {

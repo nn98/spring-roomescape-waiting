@@ -10,8 +10,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.jdbc.Sql;
-import roomescape.controller.dto.ReservationRequest;
+import roomescape.controller.dto.PaymentReservationRequest;
+import roomescape.payment.gateway.PaymentGateway;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -29,6 +31,9 @@ class RoomescapeIntegrationTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @MockitoBean
+    private PaymentGateway paymentGateway;
+
     @BeforeEach
     void setUp() {
         RestAssured.port = port;
@@ -38,7 +43,8 @@ class RoomescapeIntegrationTest {
     @DisplayName("ProblemDetail 에러 응답 규격을 정확히 준수하여 반환한다.")
     void problemDetailFormatTest() {
         insertTestData(LocalDate.now().minusDays(1));
-        ReservationRequest request = new ReservationRequest("브라운", LocalDate.now().minusDays(1), 1L, 1L);
+        PaymentReservationRequest request = new PaymentReservationRequest(
+                "브라운", LocalDate.now().minusDays(1), 1L, 1L, 0L, "pk_test", "order_test");
 
         RestAssured.given().log().all()
                 .contentType(ContentType.JSON)
@@ -92,7 +98,8 @@ class RoomescapeIntegrationTest {
         jdbcTemplate.update("INSERT INTO theme (name, description, thumbnail_url) VALUES ('코믹', '설명', 'url')");
         jdbcTemplate.update("INSERT INTO session (date, time_id, theme_id) VALUES (?, 1, 2)", LocalDate.now().plusDays(1));
 
-        ReservationRequest request = new ReservationRequest("네오", LocalDate.now().plusDays(1), 1L, 2L);
+        PaymentReservationRequest request = new PaymentReservationRequest(
+                "네오", LocalDate.now().plusDays(1), 1L, 2L, 0L, "pk_test", "order_test");
 
         RestAssured.given().log().all()
                 .contentType(ContentType.JSON)
@@ -135,5 +142,7 @@ class RoomescapeIntegrationTest {
 
         jdbcTemplate.update("INSERT INTO session (date, time_id, theme_id) VALUES (?, 1, 1)", date);
         jdbcTemplate.update("INSERT INTO reservation (name, session_id) VALUES ('브라운', 1)");
+        jdbcTemplate.update(
+                "INSERT INTO payment_order (order_id, amount, idempotency_key) VALUES ('order_test', 0, 'idem_test')");
     }
 }
